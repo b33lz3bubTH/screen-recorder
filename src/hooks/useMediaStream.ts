@@ -37,6 +37,7 @@ export const useMediaStream = () => {
   const rafRef = useRef<number | null>(null);
   const screenVideoElRef = useRef<HTMLVideoElement | null>(null);
   const webcamVideoElRef = useRef<HTMLVideoElement | null>(null);
+  const lastDrawTsRef = useRef<number>(0);
 
   const stopCompositor = useCallback(() => {
     if (rafRef.current) {
@@ -58,14 +59,21 @@ export const useMediaStream = () => {
     const screenTrack = screenStreamRef.current?.getVideoTracks()[0];
     if (!screenTrack) return;
     const settings = screenTrack.getSettings();
-    const width = (settings.width as number) || 1280;
-    const height = (settings.height as number) || 720;
+    const srcWidth = (settings.width as number) || 1280;
+    const srcHeight = (settings.height as number) || 720;
+
+    // Cap width to 1280 for smoother performance and smaller files
+    const targetWidth = Math.min(1280, srcWidth);
+    const scale = targetWidth / srcWidth;
+    const targetHeight = Math.round(srcHeight * scale);
 
     const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     const screenVideo = document.createElement('video');
     screenVideo.muted = true;
@@ -89,50 +97,56 @@ export const useMediaStream = () => {
     webcamVideoElRef.current = webcamVideo;
 
     const fps = 30;
-    const draw = () => {
+    lastDrawTsRef.current = 0;
+
+    const draw = (ts: number) => {
       const ctx2 = canvasCtxRef.current;
       const cvs = canvasRef.current;
       if (!ctx2 || !cvs) return;
 
-      ctx2.clearRect(0, 0, cvs.width, cvs.height);
-      if (screenVideoElRef.current && screenVideoElRef.current.readyState >= 2) {
-        ctx2.drawImage(screenVideoElRef.current, 0, 0, cvs.width, cvs.height);
+      if (!lastDrawTsRef.current || ts - lastDrawTsRef.current >= 1000 / fps) {
+        lastDrawTsRef.current = ts;
+
+        ctx2.clearRect(0, 0, cvs.width, cvs.height);
+        if (screenVideoElRef.current && screenVideoElRef.current.readyState >= 2) {
+          ctx2.drawImage(screenVideoElRef.current, 0, 0, cvs.width, cvs.height);
+        }
+
+        if (webcamVideoElRef.current && webcamVideoElRef.current.srcObject && webcamVideoElRef.current.readyState >= 2) {
+          const bubbleSize = Math.round(Math.min(cvs.width, cvs.height) * 0.22);
+          const margin = Math.round(bubbleSize * 0.15);
+          const x = margin + bubbleSize / 2;
+          const y = margin + bubbleSize / 2;
+
+          ctx2.save();
+          ctx2.beginPath();
+          ctx2.arc(x, y, bubbleSize / 2, 0, Math.PI * 2);
+          ctx2.closePath();
+          ctx2.clip();
+
+          const vw = webcamVideoElRef.current.videoWidth || bubbleSize;
+          const vh = webcamVideoElRef.current.videoHeight || bubbleSize;
+          const scale = Math.max(bubbleSize / vw, bubbleSize / vh);
+          const dw = vw * scale;
+          const dh = vh * scale;
+          const dx = x - dw / 2;
+          const dy = y - dh / 2;
+          ctx2.drawImage(webcamVideoElRef.current, dx, dy, dw, dh);
+          ctx2.restore();
+
+          ctx2.beginPath();
+          ctx2.arc(x, y, bubbleSize / 2, 0, Math.PI * 2);
+          ctx2.strokeStyle = 'rgba(255,255,255,0.85)';
+          ctx2.lineWidth = Math.max(2, Math.round(bubbleSize * 0.03));
+          ctx2.stroke();
+        }
       }
 
-      if (webcamVideoElRef.current && webcamVideoElRef.current.srcObject && webcamVideoElRef.current.readyState >= 2) {
-        const bubbleSize = Math.round(Math.min(cvs.width, cvs.height) * 0.22);
-        const margin = Math.round(bubbleSize * 0.15);
-        const x = margin + bubbleSize / 2;
-        const y = margin + bubbleSize / 2;
-
-        ctx2.save();
-        ctx2.beginPath();
-        ctx2.arc(x, y, bubbleSize / 2, 0, Math.PI * 2);
-        ctx2.closePath();
-        ctx2.clip();
-
-        const vw = webcamVideoElRef.current.videoWidth || bubbleSize;
-        const vh = webcamVideoElRef.current.videoHeight || bubbleSize;
-        const scale = Math.max(bubbleSize / vw, bubbleSize / vh);
-        const dw = vw * scale;
-        const dh = vh * scale;
-        const dx = x - dw / 2;
-        const dy = y - dh / 2;
-        ctx2.drawImage(webcamVideoElRef.current, dx, dy, dw, dh);
-        ctx2.restore();
-
-        ctx2.beginPath();
-        ctx2.arc(x, y, bubbleSize / 2, 0, Math.PI * 2);
-        ctx2.strokeStyle = 'rgba(255,255,255,0.85)';
-        ctx2.lineWidth = Math.max(2, Math.round(bubbleSize * 0.03));
-        ctx2.stroke();
-      }
-
-      rafRef.current = setTimeout(() => requestAnimationFrame(draw), 1000 / fps) as unknown as number;
+      rafRef.current = requestAnimationFrame(draw) as unknown as number;
     };
     requestAnimationFrame(draw);
 
-    const out = canvas.captureStream(fps);
+    const out = canvas.captureStream(30);
     compositedStreamRef.current = out;
     setScreenPreview(out);
   }, []);
@@ -160,18 +174,22 @@ export const useMediaStream = () => {
     } catch {}
   }, []);
 
-  const startScreenShare = useCallback(() => startCompositor(), [startCompositor]);
-
   const _startScreenShare = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+          frameRate: { ideal: 30, max: 30 },
+        },
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
         },
       });
+
+      const vTrack = stream.getVideoTracks()[0];
+      // contentHint helps the encoder pick better settings
+      try { (vTrack as any).contentHint = 'detail'; } catch {}
 
       screenStreamRef.current = stream;
       setState((prev) => ({ ...prev, isScreenSharing: true }));
@@ -197,10 +215,14 @@ export const useMediaStream = () => {
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 },
           facingMode: 'user',
         },
         audio: false,
       });
+
+      const vTrack = stream.getVideoTracks()[0];
+      try { (vTrack as any).contentHint = 'motion'; } catch {}
 
       webcamStreamRef.current = stream;
       setState((prev) => ({ ...prev, isCameraOn: true }));
@@ -282,7 +304,12 @@ export const useMediaStream = () => {
         }
       }
 
-      const mediaRecorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : undefined);
+      // Bitrate tuning for smoother, smaller files (~2.5Mbps video, 128kbps audio)
+      const mrOpts: MediaRecorderOptions = mimeType
+        ? { mimeType, videoBitsPerSecond: 1_800_000, audioBitsPerSecond: 96_000 }
+        : { videoBitsPerSecond: 1_800_000, audioBitsPerSecond: 96_000 };
+
+      const mediaRecorder = new MediaRecorder(combinedStream, mrOpts);
 
       mediaRecorder.ondataavailable = (evt) => {
         if (!evt.data || evt.data.size === 0 || !sessionKeyRef.current) return;
@@ -305,6 +332,7 @@ export const useMediaStream = () => {
         recordingUrl: null,
       }));
 
+      // Shorter timeslice can smooth buffering without too many requests
       mediaRecorder.start(1000);
 
       return session_key;

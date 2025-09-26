@@ -111,6 +111,7 @@ func (h *Handlers) DownloadRecording(c *gin.Context) {
 	}
 
 	filename := filepath.Base(recordingPath)
+
 	c.Header("Content-Description", "File Transfer")
 	c.Header("Content-Transfer-Encoding", "binary")
 	c.Header("Content-Disposition", "inline; filename="+filename)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,11 @@ type RecordingSession struct {
 	Mutex         sync.RWMutex
 	IsRecording   bool
 	StartTime     time.Time
+
+	chunkChan   chan []byte
+	writerDone  chan struct{}
+	file        *os.File
+	buffered    *bufio.Writer
 }
 
 type SessionManager struct {
@@ -101,9 +107,22 @@ func (sm *SessionManager) StartRecording(sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create output: %v")
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("failed to close output: %v")
-	}
+	bw := bufio.NewWriterSize(f, 1*1024*1024)
+
+	session.file = f
+	session.buffered = bw
+	session.chunkChan = make(chan []byte, 256)
+	session.writerDone = make(chan struct{})
+
+	go func() {
+		for chunk := range session.chunkChan {
+			_, _ = session.buffered.Write(chunk)
+		}
+		_ = session.buffered.Flush()
+		_ = session.file.Sync()
+		_ = session.file.Close()
+		close(session.writerDone)
+	}()
 
 	session.IsRecording = true
 	return nil
@@ -119,27 +138,24 @@ func (sm *SessionManager) AppendChunk(sessionID string, source string, data []by
 
 	session.Mutex.RLock()
 	isRecording := session.IsRecording
-	output := session.OutputPath
+	ch := session.chunkChan
 	session.Mutex.RUnlock()
 
 	if !isRecording {
 		return fmt.Errorf("session not recording")
 	}
 
-	// Currently, client sends composited 'screen' which already contains webcam overlay.
-	// We append only 'screen' chunks to the final webm; 'webcam' is ignored.
 	if source != "screen" {
 		return nil
 	}
 
-	f, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open output: %v")
-	}
-	defer f.Close()
+	buf := make([]byte, len(data))
+	copy(buf, data)
 
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("failed to write chunk: %v")
+	select {
+	case ch <- buf:
+	default:
+		// drop gracefully if producer is faster; avoids blocking network handlers
 	}
 	return nil
 }
@@ -153,8 +169,16 @@ func (sm *SessionManager) StopRecording(sessionID string) error {
 	}
 
 	session.Mutex.Lock()
-	session.IsRecording = false
+	if session.IsRecording {
+		close(session.chunkChan)
+		session.IsRecording = false
+	}
+	writerDone := session.writerDone
 	session.Mutex.Unlock()
+
+	if writerDone != nil {
+		<-writerDone
+	}
 	return nil
 }
 
@@ -165,6 +189,13 @@ func (sm *SessionManager) DeleteSession(sessionID string) error {
 	session, exists := sm.sessions[sessionID]
 	if !exists {
 		return fmt.Errorf("session not found")
+	}
+
+	if session.IsRecording && session.chunkChan != nil {
+		close(session.chunkChan)
+		if session.writerDone != nil {
+			<-session.writerDone
+		}
 	}
 
 	if session.PeerConnection != nil {
