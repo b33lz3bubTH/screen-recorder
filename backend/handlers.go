@@ -47,12 +47,17 @@ func (h *Handlers) StartRecording(c *gin.Context) {
 
 func (h *Handlers) UploadChunk(c *gin.Context) {
 	sessionID := c.Param("session_key")
+	source := c.Param("source")
+	if source != "screen" && source != "webcam" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid source"})
+		return
+	}
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil || len(data) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chunk"})
 		return
 	}
-	if err := h.sessionManager.AppendChunk(sessionID, data); err != nil {
+	if err := h.sessionManager.AppendChunk(sessionID, source, data); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

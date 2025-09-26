@@ -42,7 +42,6 @@ func (sm *SessionManager) CreateSession() (string, error) {
 	}
 
 	sessionID := uuid.New().String()
-	// Force .webm for chunk uploads regardless of configured output format
 	outputPath := filepath.Join(sm.config.Recording.UploadFolder, fmt.Sprintf("recording_%s.webm", sessionID))
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
@@ -57,10 +56,7 @@ func (sm *SessionManager) CreateSession() (string, error) {
 	}
 
 	sm.sessions[sessionID] = session
-
-	// Session timeout goroutine
 	go sm.handleSessionTimeout(sessionID)
-
 	return sessionID, nil
 }
 
@@ -101,7 +97,6 @@ func (sm *SessionManager) StartRecording(sessionID string) error {
 		return fmt.Errorf("recording already in progress")
 	}
 
-	// Truncate/create the output file at start
 	f, err := os.Create(session.OutputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output: %v")
@@ -114,7 +109,7 @@ func (sm *SessionManager) StartRecording(sessionID string) error {
 	return nil
 }
 
-func (sm *SessionManager) AppendChunk(sessionID string, data []byte) error {
+func (sm *SessionManager) AppendChunk(sessionID string, source string, data []byte) error {
 	sm.mutex.RLock()
 	session, exists := sm.sessions[sessionID]
 	sm.mutex.RUnlock()
@@ -129,6 +124,12 @@ func (sm *SessionManager) AppendChunk(sessionID string, data []byte) error {
 
 	if !isRecording {
 		return fmt.Errorf("session not recording")
+	}
+
+	// Currently, client sends composited 'screen' which already contains webcam overlay.
+	// We append only 'screen' chunks to the final webm; 'webcam' is ignored.
+	if source != "screen" {
+		return nil
 	}
 
 	f, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

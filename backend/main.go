@@ -58,7 +58,7 @@ func main() {
 	// Recording endpoints
 	router.POST("/start-recording", handlers.StartRecording)
 	router.POST("/stop-recording", handlers.StopRecording)
-	router.POST("/upload-chunk/:session_key", handlers.UploadChunk)
+	router.POST("/upload-chunk/:session_key/:source", handlers.UploadChunk)
 	router.GET("/download/:session_key", handlers.DownloadRecording)
 	router.GET("/session/:session_key/status", handlers.GetSessionStatus)
 	router.GET("/sessions", handlers.ListSessions)

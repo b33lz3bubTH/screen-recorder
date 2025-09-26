@@ -29,8 +29,8 @@ export class ApiService {
     return response.json();
   }
 
-  static async uploadChunk(sessionKey: string, chunk: Blob): Promise<void> {
-    const res = await fetch(`${API_BASE_URL}/upload-chunk/${sessionKey}`, {
+  static async uploadChunk(sessionKey: string, source: 'screen' | 'webcam', chunk: Blob): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/upload-chunk/${sessionKey}/${source}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
