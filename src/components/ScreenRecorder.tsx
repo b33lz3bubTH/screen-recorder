@@ -3,6 +3,7 @@ import { useMediaStream } from '@/hooks/useMediaStream';
 import { WebcamBubble } from './WebcamBubble';
 import { RecordingControls } from './RecordingControls';
 import { RecordingStatus } from './RecordingStatus';
+import { VideoPlayer } from './VideoPlayer';
 import { Button } from '@/components/ui/button';
 import { Monitor, Play } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
@@ -20,6 +21,7 @@ export const ScreenRecorder: React.FC = () => {
     toggleMic,
     toggleCamera,
     endSession,
+    clearRecording,
   } = useMediaStream();
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
@@ -55,7 +57,7 @@ export const ScreenRecorder: React.FC = () => {
       await startRecording();
       toast({
         title: "Recording started",
-        description: "Your screen is now being recorded.",
+        description: "Your screen is now being recorded and streamed to the backend.",
       });
     } catch (error) {
       toast({
@@ -71,7 +73,7 @@ export const ScreenRecorder: React.FC = () => {
       await stopRecording();
       toast({
         title: "Recording stopped",
-        description: "Your recording has been saved.",
+        description: "Your recording has been saved and is ready for viewing.",
       });
     } catch (error) {
       toast({
@@ -89,6 +91,10 @@ export const ScreenRecorder: React.FC = () => {
       title: "Session ended",
       description: "Screen sharing session has been terminated.",
     });
+  };
+
+  const handleCloseVideo = () => {
+    clearRecording();
   };
 
   if (!isSetupComplete) {
@@ -133,13 +139,14 @@ export const ScreenRecorder: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-background relative">
-      {/* Screen sharing display */}
+      {/* Screen sharing display - ALWAYS show when screen sharing is active */}
       {state.isScreenSharing && (
         <div className="absolute inset-0 z-0">
           <video
             ref={screenVideoRef}
             autoPlay
             muted
+            playsInline
             className="w-full h-full object-contain bg-black"
           />
         </div>
@@ -171,6 +178,15 @@ export const ScreenRecorder: React.FC = () => {
         onToggleMic={toggleMic}
         onEndSession={handleEndSession}
       />
+
+      {/* Video player modal - show after recording stops */}
+      {state.recordingUrl && state.sessionKey && (
+        <VideoPlayer
+          videoUrl={state.recordingUrl}
+          sessionKey={state.sessionKey}
+          onClose={handleCloseVideo}
+        />
+      )}
     </div>
   );
 };

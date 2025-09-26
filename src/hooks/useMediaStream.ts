@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
+import { ApiService } from '@/lib/api';
 
 interface MediaStreamState {
   isRecording: boolean;
@@ -6,6 +7,7 @@ interface MediaStreamState {
   isCameraOn: boolean;
   isMicMuted: boolean;
   sessionKey: string | null;
+  recordingUrl: string | null;
 }
 
 export const useMediaStream = () => {
@@ -15,32 +17,49 @@ export const useMediaStream = () => {
     isCameraOn: false,
     isMicMuted: false,
     sessionKey: null,
+    recordingUrl: null,
   });
+
+  const [screenPreview, setScreenPreview] = useState<MediaStream | null>(null);
 
   const screenStreamRef = useRef<MediaStream | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const combinedStreamRef = useRef<MediaStream | null>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const lastUploadRef = useRef<Promise<void>>(Promise.resolve());
+  const sessionKeyRef = useRef<string | null>(null);
+
+  const prewarmPermissions = useCallback(async () => {
+    try {
+      const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mic.getTracks().forEach(t => t.stop());
+    } catch {}
+    try {
+      const cam = await navigator.mediaDevices.getUserMedia({ video: true });
+      cam.getTracks().forEach(t => t.stop());
+    } catch {}
+  }, []);
 
   const startScreenShare = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: { 
+        audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false
-        }
+          autoGainControl: false,
+        },
       });
-      
+
       screenStreamRef.current = stream;
-      setState(prev => ({ ...prev, isScreenSharing: true }));
-      
-      // Handle screen share end
+      setScreenPreview(stream);
+      setState((prev) => ({ ...prev, isScreenSharing: true }));
+
       stream.getVideoTracks()[0].addEventListener('ended', () => {
-        setState(prev => ({ ...prev, isScreenSharing: false }));
+        setState((prev) => ({ ...prev, isScreenSharing: false }));
         screenStreamRef.current = null;
+        setScreenPreview(null);
       });
 
       return stream;
@@ -53,16 +72,16 @@ export const useMediaStream = () => {
   const startWebcam = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { 
+        video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
-          facingMode: 'user'
+          facingMode: 'user',
         },
-        audio: false // We'll handle audio separately
+        audio: false,
       });
-      
+
       webcamStreamRef.current = stream;
-      setState(prev => ({ ...prev, isCameraOn: true }));
+      setState((prev) => ({ ...prev, isCameraOn: true }));
       return stream;
     } catch (error) {
       console.error('Error starting webcam:', error);
@@ -76,10 +95,10 @@ export const useMediaStream = () => {
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
-        }
+          autoGainControl: true,
+        },
       });
-      
+
       audioStreamRef.current = stream;
       return stream;
     } catch (error) {
@@ -90,23 +109,20 @@ export const useMediaStream = () => {
 
   const combineTracks = useCallback(() => {
     const combinedStream = new MediaStream();
-    
-    // Add screen video track
+
     if (screenStreamRef.current) {
       const videoTrack = screenStreamRef.current.getVideoTracks()[0];
       if (videoTrack) combinedStream.addTrack(videoTrack);
     }
-    
-    // Add audio tracks
+
     if (audioStreamRef.current) {
-      audioStreamRef.current.getAudioTracks().forEach(track => {
+      audioStreamRef.current.getAudioTracks().forEach((track) => {
         combinedStream.addTrack(track);
       });
     }
-    
-    // Add screen audio if available
+
     if (screenStreamRef.current) {
-      screenStreamRef.current.getAudioTracks().forEach(track => {
+      screenStreamRef.current.getAudioTracks().forEach((track) => {
         combinedStream.addTrack(track);
       });
     }
@@ -117,34 +133,49 @@ export const useMediaStream = () => {
 
   const startRecording = useCallback(async () => {
     try {
-      // Request session key from backend
-      const response = await fetch('/api/recording/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      
-      const { session_key } = await response.json();
-      
-      // Setup WebRTC connection
-      const peerConnection = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      });
-      
+      const { session_key } = await ApiService.startRecording();
+      sessionKeyRef.current = session_key;
+
       const combinedStream = combineTracks();
-      
-      // Add tracks to peer connection
-      combinedStream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, combinedStream);
-      });
-      
-      peerConnectionRef.current = peerConnection;
-      
-      setState(prev => ({ 
-        ...prev, 
-        isRecording: true, 
-        sessionKey: session_key 
+
+      const mimeCandidates = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ];
+      let mimeType = '';
+      for (const candidate of mimeCandidates) {
+        if (MediaRecorder.isTypeSupported(candidate)) {
+          mimeType = candidate;
+          break;
+        }
+      }
+
+      const mediaRecorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : undefined);
+
+      mediaRecorder.ondataavailable = (evt) => {
+        if (!evt.data || evt.data.size === 0 || !sessionKeyRef.current) return;
+        const key = sessionKeyRef.current;
+        lastUploadRef.current = lastUploadRef.current
+          .then(() => ApiService.uploadChunk(key as string, evt.data))
+          .catch(() => undefined);
+      };
+
+      mediaRecorder.onerror = (e) => {
+        console.error('MediaRecorder error', e);
+      };
+
+      mediaRecorderRef.current = mediaRecorder;
+
+      setState((prev) => ({
+        ...prev,
+        isRecording: true,
+        sessionKey: session_key,
+        recordingUrl: null,
       }));
-      
+
+      mediaRecorder.start(1000);
+
       return session_key;
     } catch (error) {
       console.error('Error starting recording:', error);
@@ -154,82 +185,81 @@ export const useMediaStream = () => {
 
   const stopRecording = useCallback(async () => {
     try {
-      if (state.sessionKey) {
-        await fetch('/api/recording/stop', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_key: state.sessionKey })
-        });
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
       }
-      
-      // Close peer connection
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
+
+      await lastUploadRef.current;
+
+      if (sessionKeyRef.current) {
+        await ApiService.stopRecording(sessionKeyRef.current);
+        const downloadUrl = ApiService.getDownloadUrl(sessionKeyRef.current);
+        setState((prev) => ({ ...prev, isRecording: false, recordingUrl: downloadUrl }));
       }
-      
-      setState(prev => ({ 
-        ...prev, 
-        isRecording: false, 
-        sessionKey: null 
-      }));
     } catch (error) {
       console.error('Error stopping recording:', error);
       throw error;
     }
-  }, [state.sessionKey]);
+  }, []);
 
   const toggleMic = useCallback(() => {
     if (audioStreamRef.current) {
       const audioTracks = audioStreamRef.current.getAudioTracks();
-      audioTracks.forEach(track => {
+      audioTracks.forEach((track) => {
         track.enabled = state.isMicMuted;
       });
-      setState(prev => ({ ...prev, isMicMuted: !prev.isMicMuted }));
+      setState((prev) => ({ ...prev, isMicMuted: !prev.isMicMuted }));
     }
   }, [state.isMicMuted]);
 
   const toggleCamera = useCallback(async () => {
     if (state.isCameraOn) {
-      // Turn off camera
       if (webcamStreamRef.current) {
-        webcamStreamRef.current.getTracks().forEach(track => track.stop());
+        webcamStreamRef.current.getTracks().forEach((track) => track.stop());
         webcamStreamRef.current = null;
       }
-      setState(prev => ({ ...prev, isCameraOn: false }));
+      setState((prev) => ({ ...prev, isCameraOn: false }));
     } else {
-      // Turn on camera
       await startWebcam();
     }
   }, [state.isCameraOn, startWebcam]);
 
   const endSession = useCallback(() => {
-    // Stop all streams
-    [screenStreamRef, webcamStreamRef, audioStreamRef, combinedStreamRef].forEach(ref => {
+    [screenStreamRef, webcamStreamRef, audioStreamRef, combinedStreamRef].forEach((ref) => {
       if (ref.current) {
-        ref.current.getTracks().forEach(track => track.stop());
+        ref.current.getTracks().forEach((track) => track.stop());
         ref.current = null;
       }
     });
-    
-    // Close peer connection
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
+
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
+      } catch {}
+      mediaRecorderRef.current = null;
     }
-    
+
+    sessionKeyRef.current = null;
+
+    setScreenPreview(null);
+
     setState({
       isRecording: false,
       isScreenSharing: false,
       isCameraOn: false,
       isMicMuted: false,
       sessionKey: null,
+      recordingUrl: null,
     });
+  }, []);
+
+  const clearRecording = useCallback(() => {
+    setState((prev) => ({ ...prev, recordingUrl: null }));
   }, []);
 
   return {
     state,
-    screenStream: screenStreamRef.current,
+    screenStream: screenPreview,
     webcamStream: webcamStreamRef.current,
     audioStream: audioStreamRef.current,
     startScreenShare,
@@ -240,5 +270,7 @@ export const useMediaStream = () => {
     toggleMic,
     toggleCamera,
     endSession,
+    clearRecording,
+    prewarmPermissions,
   };
 };

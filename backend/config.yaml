@@ -1,0 +1,20 @@
+server:
+  port: ":8080"
+  host: "localhost"
+
+recording:
+  upload_folder: "./recordings"
+  max_sessions: 10
+  session_timeout_minutes: 30
+  video_codec: "libx264"
+  audio_codec: "aac"
+  output_format: "mp4"
+
+webrtc:
+  ice_servers:
+    - urls: "stun:stun.l.google.com:19302"
+    - urls: "stun:stun1.l.google.com:19302"
+
+logging:
+  level: "info"
+  file: "./logs/app.log"
